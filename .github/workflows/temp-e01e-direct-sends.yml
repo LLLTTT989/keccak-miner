@@ -1,0 +1,88 @@
+name: Temporary E01e direct sends
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/temp-e01e-direct-sends.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Locate direct sends
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet requests 'web3>=7,<8'
+          python3 - <<'PY'
+          import requests,time
+          from decimal import Decimal,getcontext
+          from datetime import datetime,timezone,timedelta
+          from web3 import Web3
+          from hexbytes import HexBytes
+          getcontext().prec=90
+          T='0xe01ecff2f6c4f2416e83e6861e8abf79b1c95950';A6='0xa6ae8e0d2e294018dd3e36caf6c828b79236f71d';F5='0xf5947f530b2a67b3d9ef211c10abba06c6c3a836';B='https://eth.blockscout.com/api/v2';CUT='2026-08-04T00:00:00.000000Z'
+          s=requests.Session();s.headers.update({'user-agent':'Mozilla/5.0','accept':'application/json'})
+          def g(path,p=None):
+            for i in range(5):
+              r=s.get(B+path,params=p,timeout=60)
+              if r.status_code==429 or r.status_code>=500:time.sleep(i+1);continue
+              r.raise_for_status();return r.json()
+            raise RuntimeError(path)
+          def h(x):return ((x or {}).get('hash') or '').lower() if isinstance(x,dict) else ''
+          def lab(x):
+            x=x or {};z=[]
+            for k in ('name','ens_domain_name','implementation_name'):
+              if x.get(k):z.append(str(x[k]))
+            for k in ('public_tags','watchlist_names'):
+              for y in x.get(k) or []:
+                if isinstance(y,dict):
+                  v=y.get('display_name') or y.get('name') or y.get('label')
+                  if v:z.append(str(v))
+            return ';'.join(dict.fromkeys(z)) or '-'
+          def j(st):return datetime.fromisoformat(st.replace('Z','+00:00')).astimezone(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S JST') if st else '-'
+          params={};sent=[]
+          for page in range(1,80):
+            d=g(f'/addresses/{T}/transactions',params);items=d.get('items') or []
+            if not items:break
+            oldest=None
+            for x in items:
+              st=x.get('timestamp');oldest=st or oldest
+              if st and st>=CUT and h(x.get('from'))==T:sent.append(x)
+            n=d.get('next_page_params')
+            if not isinstance(n,dict) or not n or (oldest and oldest<CUT):break
+            params=n
+          print('SENT_COUNT|%s'%len(sent))
+          interesting=[]
+          for x in sorted(sent,key=lambda z:z.get('timestamp') or ''):
+            m=str(x.get('method') or '').lower();to=h(x.get('to'))
+            if m not in ('ship','dock','approve','claim'):
+              interesting.append(x);print('INTERESTING_TX|jst=%s|hash=%s|to=%s|contract=%s|label=%s|method=%s|status=%s|value=%s'%(j(x.get('timestamp')),x.get('hash'),to,(x.get('to') or {}).get('is_contract'),lab(x.get('to')),x.get('method'),x.get('status'),x.get('value')))
+          print('INTERESTING_COUNT|%s'%len(interesting))
+          # Fetch each interesting tx and print all token transfers involving target.
+          for x in interesting:
+            hh=x.get('hash');d=g('/transactions/'+hh)
+            for q in d.get('token_transfers') or []:
+              if h(q.get('from'))!=T and h(q.get('to'))!=T:continue
+              total=q.get('total') or {};tok=q.get('token') or {};dec=int(total.get('decimals',tok.get('decimals',0)) or 0);amt=Decimal(str(total.get('value') or 0))/(Decimal(10)**dec)
+              print('TX_TOKEN|jst=%s|hash=%s|symbol=%s|amount=%s|from=%s|to=%s|to_contract=%s|to_label=%s'%(j(x.get('timestamp')),hh,tok.get('symbol'),amt,h(q.get('from')),h(q.get('to')),(q.get('to') or {}).get('is_contract'),lab(q.get('to'))))
+          # Targeted recipient incoming rows from target.
+          for dst in (A6,F5):
+            params={'type':'ERC-20','filter':'to'};found=0
+            for page in range(1,35):
+              d=g(f'/addresses/{dst}/token-transfers',params);items=d.get('items') or []
+              if not items:break
+              oldest=None
+              for q in items:
+                st=q.get('timestamp');oldest=st or oldest
+                if st and st>=CUT and h(q.get('from'))==T and h(q.get('to'))==dst:
+                  total=q.get('total') or {};tok=q.get('token') or {};dec=int(total.get('decimals',tok.get('decimals',0)) or 0);amt=Decimal(str(total.get('value') or 0))/(Decimal(10)**dec);found+=1
+                  print('TARGET_TO_ASSOC|jst=%s|from=%s|to=%s|symbol=%s|amount=%s|tx=%s'%(j(st),T,dst,tok.get('symbol'),amt,q.get('transaction_hash')))
+              n=d.get('next_page_params')
+              if not isinstance(n,dict) or not n or (oldest and oldest<CUT):break
+              params={'type':'ERC-20','filter':'to',**n}
+            print('TARGET_TO_ASSOC_COUNT|to=%s|count=%s'%(dst,found))
+          PY
